@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { BackHandler, Keyboard, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { byteLength } from '@/ble/codec';
-import { CHAR_UUID, SERVICE_UUID } from '@/ble/constants';
+import { byteLength, decodeText, isReadableText, toHex } from '@/ble/codec';
 import { errorMessage } from '@/ble/errors';
-import type { ConnectedDevice } from '@/ble/model';
+import type { ConnectedDevice, GattCharacteristic } from '@/ble/model';
 import type { Ble } from '@/ble/use-ble';
 import { AppButton } from '@/components/app-button';
+import { DeviceCard } from '@/components/device-card';
 import { SimulatedNotice } from '@/components/simulated-notice';
 import { StepCard } from '@/components/step-card';
 import { Colors, MonoFont, Radius, Spacing } from '@/constants/theme';
@@ -15,12 +15,20 @@ import { useKeyboardHeight } from '@/hooks/use-keyboard-height';
 import { showAlert } from '@/utils/alert';
 import { composeMessage, formatTime, parseGrade } from '@/utils/format';
 
-type Reading = { value: string; at: Date };
+type Reading = { base64: string; at: Date };
+type Written = { text: string; at: Date };
 type Busy = 'first-read' | 'write' | 'second-read' | null;
 
-// Assignment flow: 1. read -> 2. write "name & buddy" -> 3. read again (predicted grade).
+type Props = {
+  ble: Ble;
+  device: ConnectedDevice;
+  characteristic: GattCharacteristic;
+};
+
+// Read -> write -> read again on one characteristic.
+// Assignment mode writes "name & buddy" and shows the predicted grade; "Any device" mode writes any text.
 // Each result stays on screen so one screenshot shows the whole flow.
-export function DeviceView({ ble, device }: { ble: Ble; device: ConnectedDevice }) {
+export function DeviceView({ ble, device, characteristic }: Props) {
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
   const scrollRef = useRef<ScrollView>(null);
@@ -29,23 +37,27 @@ export function DeviceView({ ble, device }: { ble: Ble; device: ConnectedDevice 
 
   const [busy, setBusy] = useState<Busy>(null);
   const [firstRead, setFirstRead] = useState<Reading | null>(null);
-  const [written, setWritten] = useState<Reading | null>(null);
+  const [written, setWritten] = useState<Written | null>(null);
   const [secondRead, setSecondRead] = useState<Reading | null>(null);
   const [name, setName] = useState('');
   const [buddy, setBuddy] = useState('');
+  const [text, setText] = useState('');
 
-  const message = composeMessage(name, buddy);
-  const grade = secondRead ? parseGrade(secondRead.value) : null;
-  const { disconnect } = ble;
+  const assignment = ble.mode === 'assignment';
+  const message = assignment ? composeMessage(name, buddy) : text;
+  const grade = secondRead ? parseGrade(decodeText(secondRead.base64)) : null;
+  const { disconnect, select } = ble;
 
-  // Android back button disconnects instead of closing the app, so the device is freed for the next phone
+  // Android back button: "Any device" goes back to the characteristic list, assignment mode disconnects
+  // so the device is freed for the next phone
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      disconnect();
+      if (assignment) disconnect();
+      else select(null);
       return true;
     });
     return () => subscription.remove();
-  }, [disconnect]);
+  }, [assignment, disconnect, select]);
 
   // Keep the write step (inputs + button) visible above the keyboard
   useEffect(() => {
@@ -57,7 +69,7 @@ export function DeviceView({ ble, device }: { ble: Ble; device: ConnectedDevice 
   async function readValue(step: 'first-read' | 'second-read') {
     setBusy(step);
     try {
-      const reading = { value: await ble.read(), at: new Date() };
+      const reading = { base64: await ble.read(), at: new Date() };
       if (step === 'first-read') setFirstRead(reading);
       else setSecondRead(reading);
     } catch (error) {
@@ -69,14 +81,14 @@ export function DeviceView({ ble, device }: { ble: Ble; device: ConnectedDevice 
 
   async function writeValue() {
     if (!message) {
-      showAlert('Input Error', 'Please enter your name.');
+      showAlert('Input Error', assignment ? 'Please enter your name.' : 'Please enter a value to write.');
       return;
     }
     Keyboard.dismiss();
     setBusy('write');
     try {
       await ble.write(message);
-      setWritten({ value: message, at: new Date() });
+      setWritten({ text: message, at: new Date() });
       showAlert('Write Success', `Value "${message}" written successfully.`);
     } catch (error) {
       showAlert('Write failed', errorMessage(error));
@@ -95,15 +107,16 @@ export function DeviceView({ ble, device }: { ble: Ble; device: ConnectedDevice 
       ]}
       keyboardShouldPersistTaps="handled">
       {ble.simulated && <SimulatedNotice />}
-      <DeviceCard device={device} />
+      <DeviceCard device={device} characteristic={characteristic} />
 
       <StepCard step={1} title="Read the characteristic" done={firstRead !== null}>
         <AppButton
           title="Read value"
           onPress={() => readValue('first-read')}
           loading={busy === 'first-read'}
-          disabled={busy !== null}
+          disabled={busy !== null || !characteristic.canRead}
         />
+        {!characteristic.canRead && <Text style={styles.note}>This characteristic cannot be read.</Text>}
         <ResultBox reading={firstRead} placeholder="No value read yet" />
       </StepCard>
 
@@ -111,126 +124,141 @@ export function DeviceView({ ble, device }: { ble: Ble; device: ConnectedDevice 
         onLayout={(event) => {
           writeStepY.current = event.nativeEvent.layout.y;
         }}>
-        <StepCard step={2} title="Write your name and your buddy" done={written !== null}>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="Your name"
-            placeholderTextColor={Colors.muted}
-            selectionColor={Colors.text}
-            cursorColor={Colors.text}
-            keyboardAppearance="dark"
-            autoCapitalize="words"
-            autoCorrect={false}
-            maxLength={40}
-            returnKeyType="next"
-            submitBehavior="submit"
-            onSubmitEditing={() => buddyInputRef.current?.focus()}
-          />
-          <TextInput
-            ref={buddyInputRef}
-            style={styles.input}
-            value={buddy}
-            onChangeText={setBuddy}
-            placeholder="Your buddy's name (optional)"
-            placeholderTextColor={Colors.muted}
-            selectionColor={Colors.text}
-            cursorColor={Colors.text}
-            keyboardAppearance="dark"
-            autoCapitalize="words"
-            autoCorrect={false}
-            maxLength={40}
-            returnKeyType="done"
-          />
+        <StepCard
+          step={2}
+          title={assignment ? 'Write your name and your buddy' : 'Write a value'}
+          done={written !== null}>
+          {assignment ? (
+            <>
+              <TextInput
+                style={styles.input}
+                value={name}
+                onChangeText={setName}
+                placeholder="Your name"
+                placeholderTextColor={Colors.muted}
+                selectionColor={Colors.text}
+                cursorColor={Colors.text}
+                keyboardAppearance="dark"
+                autoCapitalize="words"
+                autoCorrect={false}
+                maxLength={40}
+                returnKeyType="next"
+                submitBehavior="submit"
+                onSubmitEditing={() => buddyInputRef.current?.focus()}
+              />
+              <TextInput
+                ref={buddyInputRef}
+                style={styles.input}
+                value={buddy}
+                onChangeText={setBuddy}
+                placeholder="Your buddy's name (optional)"
+                placeholderTextColor={Colors.muted}
+                selectionColor={Colors.text}
+                cursorColor={Colors.text}
+                keyboardAppearance="dark"
+                autoCapitalize="words"
+                autoCorrect={false}
+                maxLength={40}
+                returnKeyType="done"
+              />
+            </>
+          ) : (
+            <TextInput
+              style={styles.input}
+              value={text}
+              onChangeText={setText}
+              placeholder="Text to write"
+              placeholderTextColor={Colors.muted}
+              selectionColor={Colors.text}
+              cursorColor={Colors.text}
+              keyboardAppearance="dark"
+              autoCapitalize="none"
+              autoCorrect={false}
+              maxLength={180}
+              returnKeyType="done"
+            />
+          )}
           <Text style={styles.preview}>
             {message
               ? `Will write: "${message}" (${byteLength(message)} bytes)`
-              : 'Type your name to see what will be written.'}
+              : assignment
+                ? 'Type your name to see what will be written.'
+                : 'Type the text to write (sent as UTF-8).'}
           </Text>
           <AppButton
             title="Write value"
             onPress={writeValue}
             loading={busy === 'write'}
-            disabled={busy !== null}
+            disabled={busy !== null || !characteristic.canWrite}
           />
+          {!characteristic.canWrite && <Text style={styles.note}>This characteristic cannot be written.</Text>}
           {written && (
-            <Text style={styles.written}>{`✓ Wrote "${written.value}" at ${formatTime(written.at)}`}</Text>
+            <Text style={styles.written}>{`✓ Wrote "${written.text}" at ${formatTime(written.at)}`}</Text>
           )}
         </StepCard>
       </View>
 
-      <StepCard step={3} title="Read again: your predicted grade" done={secondRead !== null}>
+      <StepCard
+        step={3}
+        title={assignment ? 'Read again: your predicted grade' : 'Read again'}
+        done={secondRead !== null}>
         <AppButton
           title="Read value again"
           onPress={() => readValue('second-read')}
           loading={busy === 'second-read'}
-          disabled={busy !== null}
+          disabled={busy !== null || !characteristic.canRead}
         />
         {grade && <GradeBadge grade={grade} />}
-        <ResultBox reading={secondRead} placeholder="Write in step 2, then read again to see your grade" />
+        <ResultBox
+          reading={secondRead}
+          placeholder={
+            assignment
+              ? 'Write in step 2, then read again to see your grade'
+              : 'Write in step 2, then read again to see the new value'
+          }
+        />
       </StepCard>
 
+      {!assignment && (
+        <AppButton
+          title="Choose another characteristic"
+          variant="secondary"
+          onPress={() => select(null)}
+          disabled={busy !== null}
+        />
+      )}
       <AppButton title="Disconnect" variant="quiet" onPress={disconnect} disabled={busy !== null} />
     </ScrollView>
   );
 }
 
-function DeviceCard({ device }: { device: ConnectedDevice }) {
-  const properties =
-    [
-      device.canRead ? 'Read' : null,
-      device.canWrite ? (device.writeWithResponse ? 'Write' : 'Write without response') : null,
-    ]
-      .filter(Boolean)
-      .join(' · ') || 'none';
-
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <View style={styles.flex}>
-          <Text style={styles.caption}>Connected to</Text>
-          <Text style={styles.deviceName} numberOfLines={1}>
-            {device.name}
-          </Text>
-        </View>
-        <View style={styles.connectedPill}>
-          <View style={styles.connectedDot} />
-          <Text style={styles.connectedText}>Connected</Text>
-        </View>
-      </View>
-      <Text style={styles.meta}>{`${device.id}  ·  MTU ${device.mtu}`}</Text>
-      <View style={styles.divider} />
-      <InfoRow label="Service" value={SERVICE_UUID} />
-      <InfoRow label={`Characteristic (${properties})`} value={CHAR_UUID} />
-    </View>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.infoRow}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue} selectable>
-        {value}
-      </Text>
-    </View>
-  );
-}
-
+// Shows a value as text when it looks like text, otherwise as binary; always with its hex bytes
 function ResultBox({ reading, placeholder }: { reading: Reading | null; placeholder: string }) {
+  if (!reading) {
+    return (
+      <View style={styles.result}>
+        <Text style={styles.resultPlaceholder}>{placeholder}</Text>
+      </View>
+    );
+  }
+
+  const hex = toHex(reading.base64);
+  const text = decodeText(reading.base64);
+  let shown = '(binary data)';
+  if (hex === '') shown = '(empty value)';
+  else if (text !== '' && isReadableText(text)) shown = text;
+
   return (
     <View style={styles.result}>
-      {reading ? (
-        <>
-          <Text style={styles.resultValue} selectable>
-            {reading.value === '' ? '(empty value)' : reading.value}
-          </Text>
-          <Text style={styles.resultTime}>Read at {formatTime(reading.at)}</Text>
-        </>
-      ) : (
-        <Text style={styles.resultPlaceholder}>{placeholder}</Text>
+      <Text style={styles.resultValue} selectable>
+        {shown}
+      </Text>
+      {hex !== '' && (
+        <Text style={styles.resultHex} selectable numberOfLines={3}>
+          {`HEX  ${hex}`}
+        </Text>
       )}
+      <Text style={styles.resultTime}>Read at {formatTime(reading.at)}</Text>
     </View>
   );
 }
@@ -247,34 +275,6 @@ function GradeBadge({ grade }: { grade: string }) {
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Spacing.lg, gap: Spacing.md },
-  flex: { flex: 1 },
-  card: {
-    backgroundColor: Colors.surface,
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: Spacing.lg,
-    gap: Spacing.sm,
-  },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
-  caption: { fontSize: 12, color: Colors.muted, textTransform: 'uppercase', letterSpacing: 0.5 },
-  deviceName: { fontSize: 20, fontWeight: '700', color: Colors.text },
-  connectedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: Colors.accent,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  connectedDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.onAccent },
-  connectedText: { fontSize: 12, fontWeight: '700', color: Colors.onAccent },
-  meta: { fontFamily: MonoFont, fontSize: 12, color: Colors.muted },
-  divider: { height: 1, backgroundColor: Colors.border, marginVertical: Spacing.xs },
-  infoRow: { gap: 2 },
-  infoLabel: { fontSize: 12, color: Colors.muted },
-  infoValue: { fontFamily: MonoFont, fontSize: 12, color: Colors.text },
   input: {
     borderWidth: 1,
     borderColor: Colors.border,
@@ -286,9 +286,11 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   preview: { fontSize: 13, color: Colors.muted },
+  note: { fontSize: 13, color: Colors.muted },
   written: { fontSize: 13, fontWeight: '700', color: Colors.text },
   result: { backgroundColor: Colors.surfaceRaised, borderRadius: Radius.sm, padding: Spacing.md, gap: Spacing.xs },
   resultValue: { fontSize: 16, color: Colors.text, textAlign: 'center' },
+  resultHex: { fontFamily: MonoFont, fontSize: 12, color: Colors.muted, textAlign: 'center' },
   resultTime: { fontSize: 12, color: Colors.muted, textAlign: 'center' },
   resultPlaceholder: { fontSize: 14, color: Colors.muted, textAlign: 'center' },
   grade: {

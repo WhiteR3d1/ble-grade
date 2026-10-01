@@ -7,6 +7,13 @@
 | Service | `aee04821-1973-4e1f-a590-e84b10d580e7` |
 | Characteristic | `cde07b1a-889b-44b7-a99f-c888dddac729` |
 
+## สองโหมด
+
+เลือกได้ที่หน้าสแกน
+
+- **Assignment UUID:** ล็อค UUID ของอาจารย์ ต่อได้เฉพาะเครื่องที่มี Service/Characteristic ข้างบน แล้วเข้าหน้า 3 ขั้นทันที เขียนเป็นชื่อ (และบัดดี้ ถ้ามี) และแสดงเกรด
+- **Any device:** ไม่ล็อค ต่อได้ทุกเครื่อง แล้วเลือก Characteristic จากรายการ Service ทั้งหมดของเครื่องนั้น เขียนเป็นข้อความอะไรก็ได้ (UTF-8) ค่าที่อ่านแสดงทั้งข้อความและ HEX
+
 ## รันแอป
 
 แอปใช้ `react-native-ble-plx` ซึ่งเป็น native module จึง **เปิดใน Expo Go ไม่ได้** ต้อง build ลงมือถือ Android ที่ต่อ USB และเปิด USB debugging ไว้
@@ -36,15 +43,18 @@ npm run android:release
 | ไฟล์ | หน้าที่ |
 |---|---|
 | `src/ble/constants.ts` | UUID, เวลาสแกน, timeout |
-| `src/ble/use-ble.ts` | state ของแอป: สแกน, เชื่อมต่อ, อ่าน, เขียน, ตัดการเชื่อมต่อ |
-| `src/ble/transport.ts` | คุยกับ BLE จริงผ่าน `react-native-ble-plx` และตรวจว่ามี Service/Characteristic |
+| `src/ble/use-ble.ts` | state ของแอป: โหมด, สแกน, เชื่อมต่อ (ตรวจ UUID ในโหมด Assignment), อ่าน, เขียน, ตัดการเชื่อมต่อ |
+| `src/ble/transport.ts` | คุยกับ BLE จริงผ่าน `react-native-ble-plx` และอ่านรายการ Service/Characteristic ทั้งหมด |
 | `src/ble/transport.web.ts` | อุปกรณ์จำลองสำหรับเวอร์ชันเว็บ |
 | `src/ble/model.ts` | type ที่ใช้ร่วมกัน |
+| `src/ble/gatt.ts` | ชื่อของ Service/Characteristic มาตรฐาน และคำอธิบาย property |
 | `src/ble/permissions.ts` | ขอสิทธิ์ Nearby devices / Location ของ Android |
-| `src/ble/codec.ts` | แปลงข้อความ ↔ Base64 (UTF-8) |
+| `src/ble/codec.ts` | แปลงข้อความ ↔ Base64 (UTF-8) และ HEX |
 | `src/ble/errors.ts` | error ที่แสดงให้ผู้ใช้ พร้อมบอกหน้า Settings ที่แก้ได้ |
-| `src/components/scan-view.tsx` | หน้าสแกนอุปกรณ์ |
+| `src/components/scan-view.tsx` | หน้าสแกนอุปกรณ์และปุ่มสลับโหมด |
+| `src/components/characteristic-picker.tsx` | หน้าเลือก Characteristic (โหมด Any device) |
 | `src/components/device-view.tsx` | หน้าอุปกรณ์ 3 ขั้น: Read → Write → Read again |
+| `src/components/device-card.tsx` | การ์ดข้อมูลอุปกรณ์ที่เชื่อมต่ออยู่ |
 
 ## วันใช้งานจริง
 

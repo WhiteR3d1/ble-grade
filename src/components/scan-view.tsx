@@ -3,7 +3,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SERVICE_UUID } from '@/ble/constants';
 import { errorMessage, type SettingsFix } from '@/ble/errors';
-import type { AdapterState, ScannedDevice } from '@/ble/model';
+import type { AdapterState, ConnectMode, ScannedDevice } from '@/ble/model';
 import type { Banner, Ble } from '@/ble/use-ble';
 import { AppButton } from '@/components/app-button';
 import { SimulatedNotice } from '@/components/simulated-notice';
@@ -34,7 +34,7 @@ export function ScanView({ ble }: { ble: Ble }) {
       data={ble.devices}
       keyExtractor={(device) => device.id}
       ListHeaderComponent={<Header ble={ble} busy={busy} />}
-      ListEmptyComponent={ble.scanning ? null : <EmptyState hasScanned={ble.hasScanned} />}
+      ListEmptyComponent={ble.scanning ? null : <EmptyState hasScanned={ble.hasScanned} mode={ble.mode} />}
       renderItem={({ item }) => (
         <DeviceRow
           device={item}
@@ -57,9 +57,22 @@ function Header({ ble, busy }: { ble: Ble; busy: boolean }) {
         <StatusPill status={permissionStatus(ble)} />
       </View>
 
+      <ModeSwitch mode={ble.mode} onChange={ble.setMode} disabled={busy} />
+
       <View style={styles.targetCard}>
-        <Text style={styles.caption}>Looking for service</Text>
-        <Text style={styles.uuid}>{SERVICE_UUID}</Text>
+        {ble.mode === 'assignment' ? (
+          <>
+            <Text style={styles.caption}>Looking for service</Text>
+            <Text style={styles.uuid}>{SERVICE_UUID}</Text>
+          </>
+        ) : (
+          <>
+            <Text style={styles.caption}>Any device</Text>
+            <Text style={styles.hint}>
+              Connect to any device, then pick one of its characteristics to read and write.
+            </Text>
+          </>
+        )}
       </View>
 
       <AppButton
@@ -79,6 +92,38 @@ function Header({ ble, busy }: { ble: Ble; busy: boolean }) {
       {ble.banner && <BannerView banner={ble.banner} />}
 
       {ble.devices.length > 0 && <Text style={styles.sectionTitle}>Tap a device to connect</Text>}
+    </View>
+  );
+}
+
+const MODES: { value: ConnectMode; label: string }[] = [
+  { value: 'assignment', label: 'Assignment UUID' },
+  { value: 'any', label: 'Any device' },
+];
+
+type ModeSwitchProps = {
+  mode: ConnectMode;
+  onChange: (mode: ConnectMode) => void;
+  disabled: boolean;
+};
+
+function ModeSwitch({ mode, onChange, disabled }: ModeSwitchProps) {
+  return (
+    <View style={styles.modeSwitch}>
+      {MODES.map((option) => {
+        const active = option.value === mode;
+        return (
+          <Pressable
+            key={option.value}
+            role="button"
+            aria-selected={active}
+            disabled={disabled}
+            onPress={() => onChange(option.value)}
+            style={[styles.modeOption, active && styles.modeOptionActive]}>
+            <Text style={[styles.modeLabel, active && styles.modeLabelActive]}>{option.label}</Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
@@ -184,15 +229,20 @@ function DeviceRow({ device, connecting, disabled, onPress }: DeviceRowProps) {
   );
 }
 
-function EmptyState({ hasScanned }: { hasScanned: boolean }) {
+function EmptyState({ hasScanned, mode }: { hasScanned: boolean; mode: ConnectMode }) {
+  let message =
+    'Check that Bluetooth and Location are on and you are close to the device, then scan again. If another phone is connected to it, wait until they disconnect.';
+  if (!hasScanned) {
+    message =
+      mode === 'assignment'
+        ? 'Tap "Scan devices" and pick the instructor\'s device. Devices that advertise the target service are marked with ✓.'
+        : 'Tap "Scan devices" and pick any device to see its services and characteristics.';
+  }
+
   return (
     <View style={styles.empty}>
       <Text style={styles.emptyTitle}>{hasScanned ? 'No devices found' : 'Ready to scan'}</Text>
-      <Text style={styles.emptyText}>
-        {hasScanned
-          ? 'Check that Bluetooth and Location are on and you are close to the device, then scan again. If another phone is connected to it, wait until they disconnect.'
-          : 'Tap "Scan devices" and pick the instructor\'s device. Devices that advertise the target service are marked with ✓.'}
-      </Text>
+      <Text style={styles.emptyText}>{message}</Text>
     </View>
   );
 }
@@ -233,6 +283,20 @@ const styles = StyleSheet.create({
   },
   caption: { fontSize: 12, color: Colors.muted, textTransform: 'uppercase', letterSpacing: 0.5 },
   uuid: { fontFamily: MonoFont, fontSize: 13, color: Colors.text },
+  hint: { fontSize: 13, color: Colors.text, lineHeight: 18 },
+  modeSwitch: {
+    flexDirection: 'row',
+    gap: Spacing.xs,
+    padding: Spacing.xs,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  modeOption: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: Radius.sm - 2 },
+  modeOptionActive: { backgroundColor: Colors.accent },
+  modeLabel: { fontSize: 14, fontWeight: '600', color: Colors.muted },
+  modeLabelActive: { color: Colors.onAccent, fontWeight: '700' },
   scanningRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
   muted: { color: Colors.muted },
   banner: { borderRadius: Radius.sm, padding: Spacing.md, gap: Spacing.sm },

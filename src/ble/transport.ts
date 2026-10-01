@@ -1,10 +1,9 @@
 import { Platform } from 'react-native';
 import { BleErrorCode, BleManager, ScanMode, type BleError } from 'react-native-ble-plx';
 
-import { decodeText, encodeText } from './codec';
-import { CHAR_UUID, CONNECT_TIMEOUT_MS, PREFERRED_MTU, SERVICE_UUID } from './constants';
+import { CONNECT_TIMEOUT_MS, PREFERRED_MTU } from './constants';
 import { bleFailure, errorMessage, type BleFailure } from './errors';
-import { sameUuid, type BleTransport } from './model';
+import type { BleTransport, GattCharacteristic } from './model';
 
 let sharedManager: BleManager | null = null;
 
@@ -101,20 +100,24 @@ export const transport: BleTransport = {
   },
 
   async connect(device) {
-    const label = device.name ?? device.id;
     try {
       const connected = await manager().connectToDevice(device.id, { timeout: CONNECT_TIMEOUT_MS });
       // Services and characteristics must be discovered before reading or writing
       await connected.discoverAllServicesAndCharacteristics();
 
-      const services = await connected.services();
-      if (!services.some((service) => sameUuid(service.uuid, SERVICE_UUID))) {
-        throw new Error(`"${label}" does not have the service ${SERVICE_UUID}. Choose another device.`);
-      }
-      const characteristics = await connected.characteristicsForService(SERVICE_UUID);
-      const characteristic = characteristics.find((c) => sameUuid(c.uuid, CHAR_UUID));
-      if (!characteristic) {
-        throw new Error(`The service on "${label}" has no characteristic ${CHAR_UUID}.`);
+      const characteristics: GattCharacteristic[] = [];
+      for (const service of await connected.services()) {
+        for (const characteristic of await service.characteristics()) {
+          characteristics.push({
+            serviceUUID: service.uuid,
+            uuid: characteristic.uuid,
+            canRead: characteristic.isReadable,
+            canWrite: characteristic.isWritableWithResponse || characteristic.isWritableWithoutResponse,
+            writeWithResponse:
+              characteristic.isWritableWithResponse || !characteristic.isWritableWithoutResponse,
+            canNotify: characteristic.isNotifiable || characteristic.isIndicatable,
+          });
+        }
       }
 
       let mtu = connected.mtu;
@@ -126,15 +129,7 @@ export const transport: BleTransport = {
         }
       }
 
-      return {
-        id: device.id,
-        name: connected.name ?? device.name ?? 'Unnamed device',
-        mtu,
-        canRead: characteristic.isReadable,
-        canWrite: characteristic.isWritableWithResponse || characteristic.isWritableWithoutResponse,
-        writeWithResponse:
-          characteristic.isWritableWithResponse || !characteristic.isWritableWithoutResponse,
-      };
+      return { id: device.id, name: connected.name ?? device.name ?? 'Unnamed device', mtu, characteristics };
     } catch (error) {
       await manager()
         .cancelDeviceConnection(device.id)
@@ -154,22 +149,21 @@ export const transport: BleTransport = {
       .catch(() => {});
   },
 
-  async read(device) {
+  async read(deviceId, { serviceUUID, uuid }) {
     try {
-      const characteristic = await manager().readCharacteristicForDevice(device.id, SERVICE_UUID, CHAR_UUID);
-      return decodeText(characteristic.value);
+      const characteristic = await manager().readCharacteristicForDevice(deviceId, serviceUUID, uuid);
+      return characteristic.value ?? '';
     } catch (error) {
       throw toFailure(error);
     }
   },
 
-  async write(device, text) {
-    const value = encodeText(text);
+  async write(deviceId, { serviceUUID, uuid, writeWithResponse }, base64) {
     try {
-      if (device.writeWithResponse) {
-        await manager().writeCharacteristicWithResponseForDevice(device.id, SERVICE_UUID, CHAR_UUID, value);
+      if (writeWithResponse) {
+        await manager().writeCharacteristicWithResponseForDevice(deviceId, serviceUUID, uuid, base64);
       } else {
-        await manager().writeCharacteristicWithoutResponseForDevice(device.id, SERVICE_UUID, CHAR_UUID, value);
+        await manager().writeCharacteristicWithoutResponseForDevice(deviceId, serviceUUID, uuid, base64);
       }
     } catch (error) {
       throw toFailure(error);

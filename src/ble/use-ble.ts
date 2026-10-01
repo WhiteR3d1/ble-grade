@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { encodeText } from './codec';
 import { SCAN_DURATION_MS, SERVICE_UUID } from './constants';
 import { describeError, type SettingsFix } from './errors';
 import {
+  isAssignmentCharacteristic,
   sameUuid,
   type AdapterState,
   type ConnectedDevice,
+  type ConnectMode,
+  type GattCharacteristic,
   type ScannedDevice,
 } from './model';
 import { hasBlePermissions, requestBlePermissions, type PermissionStatus } from './permissions';
@@ -28,7 +32,10 @@ export function useBle() {
   const [hasScanned, setHasScanned] = useState(false);
   const [devices, setDevices] = useState<ScannedDevice[]>([]);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [mode, setMode] = useState<ConnectMode>('assignment');
   const [connected, setConnected] = useState<ConnectedDevice | null>(null);
+  // The characteristic the read/write steps work on
+  const [selected, setSelected] = useState<GattCharacteristic | null>(null);
   const [banner, setBanner] = useState<Banner | null>(null);
   const stopWatchingDisconnect = useRef<(() => void) | null>(null);
 
@@ -132,26 +139,38 @@ export function useBle() {
     setConnectingId(device.id);
     try {
       const info = await transport.connect(device);
+      const target = info.characteristics.find(isAssignmentCharacteristic) ?? null;
+      if (mode === 'assignment' && !target) {
+        await transport.disconnect(info.id);
+        throw new Error(
+          `"${info.name}" does not have the service ${SERVICE_UUID}. Choose another device, or switch to "Any device" to see what it has.`
+        );
+      }
+
       stopWatchingDisconnect.current = transport.onDisconnected(info.id, () => {
         stopWatchingDisconnect.current?.();
         stopWatchingDisconnect.current = null;
         setConnected(null);
+        setSelected(null);
         setBanner({ tone: 'info', message: `Connection to "${info.name}" was lost. Scan and connect again.` });
       });
       setConnected(info);
+      // "Any device" mode shows the characteristic list first
+      setSelected(mode === 'assignment' ? target : null);
     } finally {
       setConnectingId(null);
     }
   }
 
+  // Values are Base64; the screen decodes them as text and hex
   async function read(): Promise<string> {
-    if (!connected) throw new Error('Not connected.');
-    return transport.read(connected);
+    if (!connected || !selected) throw new Error('Not connected.');
+    return transport.read(connected.id, selected);
   }
 
   async function write(text: string): Promise<void> {
-    if (!connected) throw new Error('Not connected.');
-    await transport.write(connected, text);
+    if (!connected || !selected) throw new Error('Not connected.');
+    await transport.write(connected.id, selected, encodeText(text));
   }
 
   async function disconnect() {
@@ -160,6 +179,7 @@ export function useBle() {
     stopWatchingDisconnect.current?.();
     stopWatchingDisconnect.current = null;
     setConnected(null);
+    setSelected(null);
     setBanner({ tone: 'info', message: `Disconnected from "${connected.name}".` });
     await transport.disconnect(connected.id);
   }
@@ -172,12 +192,16 @@ export function useBle() {
     hasScanned,
     devices,
     connectingId,
+    mode,
     connected,
+    selected,
     banner,
+    setMode,
     requestPermissions,
     startScan,
     stopScan,
     connect,
+    select: setSelected,
     read,
     write,
     disconnect,
